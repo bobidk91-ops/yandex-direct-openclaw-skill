@@ -1,10 +1,8 @@
 # Reference: Yandex Direct API wrapper (v5 / v501)
 
-This file is a compact “how to call” reference for the `yandex_direct` OpenClaw skill.
-It intentionally avoids listing every single Yandex Direct method in the API
-because all requests can be executed through the same wrapper:
-
-`service` + `method` + `params` (with one exception: `reports` JSON bodies).
+Compact "how to call" reference for the `yandex_direct` OpenClaw skill.
+All requests use the same wrapper: `service` + `method` + `params`
+(with one exception — `reports` uses a different body format).
 
 ## Base URLs (JSON)
 
@@ -13,106 +11,150 @@ because all requests can be executed through the same wrapper:
 - sandbox v5: `https://api-sandbox.direct.yandex.ru/json/v5/{service}`
 - sandbox v501: `https://api-sandbox.direct.yandex.ru/json/v501/{service}`
 
-## Authorization
+## Required headers (every request)
 
-Use the OAuth access token in header for every request:
-
-- `Authorization: Bearer <token>`
-
-In this skill, the token is expected in environment variable:
-
-- `YANDEX_DIRECT_TOKEN`
-
-Additionally, Yandex Direct requires these headers on every request:
-
-- `Client-Login: <YANDEX_DIRECT_LOGIN>`
-- `Accept-Language: ru` (override with `YANDEX_DIRECT_ACCEPT_LANGUAGE`)
-- `Content-Type: application/json; charset=utf-8`
+| Header | Value |
+|---|---|
+| `Authorization` | `Bearer <YANDEX_DIRECT_TOKEN>` |
+| `Client-Login` | `<YANDEX_DIRECT_LOGIN>` |
+| `Accept-Language` | `ru` (or `YANDEX_DIRECT_ACCEPT_LANGUAGE` env var) |
+| `Content-Type` | `application/json; charset=utf-8` |
 
 Never put the token into prompts or logs.
 
 ## Default wrapper (most services)
 
-For most services, use this JSON body:
-
 ```json
 {
   "method": "<methodName>",
-  "params": { /* method-specific parameters */ }
+  "params": { }
 }
 ```
 
-Example (simplified): `ads.get`
+Example: `campaigns.get`
 
 ```json
 {
   "method": "get",
   "params": {
-    "SelectionCriteria": { "Ids": [123456] },
-    "FieldNames": ["Id", "CampaignId", "AdGroupId", "Type", "TextAd"]
+    "SelectionCriteria": {},
+    "FieldNames": ["Id", "Name", "Status", "State"]
   }
 }
 ```
 
+## Keywords with bids: `keywords.get`
+
+```json
+{
+  "method": "get",
+  "params": {
+    "SelectionCriteria": { "CampaignIds": [706701050] },
+    "FieldNames": ["Id", "Keyword", "Bid", "ContextBid", "Status", "State", "AdGroupId"]
+  }
+}
+```
+
+`Bid` and `ContextBid` are in **microroubles** — divide by 1 000 000 to get roubles.
+
 ## Reports service (special case)
 
-For `service=reports`, the JSON request body is the report `params` only:
+Body has **no `method` field** — only `params`:
 
 ```json
 {
   "params": {
-    "SelectionCriteria": { /* DateFrom/DateTo + filters */ },
-    "FieldNames": ["AdGroupId", "Year" /* ... */],
-    "ReportName": "my_report_name",
-    "ReportType": "ACCOUNT_PERFORMANCE_REPORT",
-    "DateRangeType": "ALL_TIME",
+    "SelectionCriteria": {
+      "DateFrom": "2026-03-23",
+      "DateTo":   "2026-03-29",
+      "Filter": [
+        { "Field": "CampaignId", "Operator": "IN", "Values": ["706701050"] }
+      ]
+    },
+    "FieldNames": ["Date", "CampaignName", "Criterion", "Impressions", "Clicks", "Ctr", "AvgCpc", "Cost"],
+    "ReportName": "my_unique_report_name",
+    "ReportType": "CRITERIA_PERFORMANCE_REPORT",
+    "DateRangeType": "CUSTOM_DATE",
     "Format": "TSV",
-    "IncludeVAT": "NO",
+    "IncludeVAT": "YES",
     "IncludeDiscount": "NO"
   }
 }
 ```
 
-Report generation is described by the “report specification” schema
-(SelectionCriteria, Filter, FieldNames, Page, OrderBy, etc.).
+### SelectionCriteria for reports — important rules
 
-Online/offline behavior:
+`SelectionCriteria` accepts only these top-level fields: `DateFrom`, `DateTo`, `Filter`.
 
-- HTTP `200`: report is returned immediately in the response body (TSV).
-- HTTP `201` / `202`: report is queued/in progress; repeat the exact same request later.
-  - If the response includes `retryIn` header, wait based on it.
+`CampaignIds` / `AdGroupIds` / etc. are **NOT** direct fields — use the `Filter` array:
 
-## Common method names (cross-service)
+```json
+"Filter": [
+  { "Field": "CampaignId", "Operator": "IN", "Values": ["123456"] }
+]
+```
 
-Yandex Direct services usually follow a set of standard lifecycle operations:
+Available filter operators: `EQUALS`, `NOT_EQUALS`, `IN`, `NOT_IN`, `LESS_THAN`, `GREATER_THAN`.
 
-- `add`: create objects
-- `update`: modify objects
-- `delete`: delete objects
-- `get`: retrieve object parameters
-- `suspend`: pause
-- `resume`: restart
+### Report types and compatible FieldNames
 
-Some services add extra methods:
+| ReportType | Key FieldNames |
+|---|---|
+| `CAMPAIGN_PERFORMANCE_REPORT` | `Date`, `CampaignId`, `CampaignName`, `Impressions`, `Clicks`, `Ctr`, `AvgCpc`, `Cost` |
+| `ADGROUP_PERFORMANCE_REPORT` | `Date`, `AdGroupId`, `AdGroupName`, `CampaignName`, `Impressions`, `Clicks`, `Ctr`, `AvgCpc`, `Cost` |
+| `AD_PERFORMANCE_REPORT` | `Date`, `AdId`, `AdGroupName`, `CampaignName`, `Headline`, `Impressions`, `Clicks`, `Ctr`, `AvgCpc`, `Cost` |
+| `CRITERIA_PERFORMANCE_REPORT` | `Date`, `CampaignName`, `AdGroupName`, `Criterion`, `CriterionType`, `Impressions`, `Clicks`, `Ctr`, `AvgCpc`, `Cost` |
+| `SEARCH_QUERY_PERFORMANCE_REPORT` | `Date`, `CampaignName`, `AdGroupName`, `Query`, `Impressions`, `Clicks`, `Ctr`, `AvgCpc`, `Cost` |
+| `ACCOUNT_PERFORMANCE_REPORT` | `Date`, `Impressions`, `Clicks`, `Ctr`, `AvgCpc`, `Cost` |
 
-- `archive` / `unarchive` (common for campaigns)
-- `moderate` (commonly for ads review)
-- report generation typically uses the `reports` service wrapper above (body differs)
+Do **not** mix fields from different report types — Yandex returns error 4000.
 
-## What the agent must determine
+Use `CRITERIA_PERFORMANCE_REPORT` + `Criterion` for **keyword-level** stats (not `Keyword`).
+Use `SEARCH_QUERY_PERFORMANCE_REPORT` + `Query` for **search query** stats (not `Keyword`).
 
-Before executing an API call, the agent needs:
+### Online / offline report behavior
 
-1. `service` (URL path segment), e.g. `campaigns`, `ads`, `adgroups`, `keywords`, `reports`, etc.
-2. `method` (string), when applicable (not used for `reports`)
-3. `params` (JSON object) containing required keys for that method
+| HTTP status | Meaning | Action |
+|---|---|---|
+| `200` | Report ready | Response body is TSV |
+| `201` | Report queued (first time) | Repeat same request after `retryIn` seconds |
+| `202` | Report in progress | Repeat same request after `retryIn` seconds |
+| `400` | Bad request | Fix params and try again |
 
-If the user doesn’t provide enough data to build `params`, ask follow-up questions.
+## Common method names
 
-## Error handling expectation
+| Method | Description |
+|---|---|
+| `add` | Create objects |
+| `update` | Modify objects |
+| `delete` | Delete objects |
+| `get` | Retrieve parameters |
+| `suspend` | Pause |
+| `resume` | Resume |
+| `archive` | Archive (campaigns) |
+| `unarchive` | Unarchive (campaigns) |
+| `moderate` | Send ads for review |
 
-If the API returns an error, the agent should:
+## PowerShell execution notes
 
-1. Show the Direct error code(s) and message(s) (without leaking token)
-2. Identify the missing/invalid parts of `params`
-3. Ask the user for the missing fields or propose corrected JSON
+- Use `[System.Net.HttpWebRequest]` — **not** `Invoke-RestMethod`, which garbles UTF-8 and throws on 201/202.
+- Always write `$s.Write($bodyBytes, 0, $bodyBytes.Length)` — **not** `0` as the third argument.
+- To avoid Cyrillic garbling in terminal, save response to file with `[System.IO.File]::WriteAllText(path, content, UTF8)` and read back.
+- All monetary values (`Cost`, `Bid`, `AvgCpc`, etc.) are in **microroubles** — divide by 1 000 000.
+
+## Error handling
+
+If the API returns an error:
+
+1. Show the Direct error code(s) and message(s) — without leaking the token.
+2. Identify the missing/invalid parts of `params`.
+3. Ask the user for the missing fields or propose corrected JSON.
+
+Common errors:
+
+| Code | Meaning |
+|---|---|
+| 52 | Missing or invalid token |
+| 58 | API access not confirmed (pending application approval) |
+| 4000 | Invalid request params (wrong field names, wrong values) |
+| 8000 | Unknown or unsupported field for this SelectionCriteria / ReportType |
