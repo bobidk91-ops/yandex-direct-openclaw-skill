@@ -62,33 +62,64 @@ schema (SelectionCriteria, FieldNames, ReportType, DateRangeType, etc.).
 
 ## How the agent should execute (Windows-first)
 
-If `exec` is allowed, the agent should call the API using PowerShell (`pwsh`) + `Invoke-RestMethod`.
+If `exec` is allowed, the agent should call the API using PowerShell (`pwsh`).
 
 Execution template (agent should fill in placeholders):
 
 ```powershell
-$service = "<service>"; # validated
-$method  = "<method>";  # validated
-$directHost = "api.direct.yandex.com";
-if ($env:YANDEX_DIRECT_SANDBOX -eq "true") { $directHost = "api-sandbox.direct.yandex.ru" }
-$baseUrl = "https://$directHost";
-$useV501  = <true|false>; # set by agent based on user intent or Yandex guidance
-$uri = "$baseUrl/json/$(if ($useV501) { 'v501' } else { 'v5' })/$service"
+$service = "<service>"  # validated: ^[a-z0-9]+$
+$method  = "<method>"   # validated: ^[a-z]+$  (empty string for reports)
+$directHost = if ($env:YANDEX_DIRECT_SANDBOX -eq "true") { "api-sandbox.direct.yandex.ru" } else { "api.direct.yandex.com" }
+$useV501 = $false       # set $true for unified performance campaigns
+$uri = "https://$directHost/json/$(if ($useV501) { 'v501' } else { 'v5' })/$service"
 
-$paramsObject = <PARAMS_AS_POWERSHELL_OBJECT>;
-$bodyObject =
-    if ($service -eq "reports") { @{ params = $paramsObject } }
-    else { @{ method = $method; params = $paramsObject } }
-$bodyJson = ($bodyObject | ConvertTo-Json -Depth 80)
+$paramsObject = <PARAMS_AS_POWERSHELL_HASHTABLE>
+$bodyObject   = if ($service -eq "reports") { @{ params = $paramsObject } } else { @{ method = $method; params = $paramsObject } }
+$bodyBytes    = [System.Text.Encoding]::UTF8.GetBytes(($bodyObject | ConvertTo-Json -Depth 80 -Compress))
 
 $headers = @{
-  Authorization = "Bearer $env:YANDEX_DIRECT_TOKEN"
-  "Client-Login" = $env:YANDEX_DIRECT_LOGIN
-  "Accept-Language" = (if ($env:YANDEX_DIRECT_ACCEPT_LANGUAGE) { $env:YANDEX_DIRECT_ACCEPT_LANGUAGE } else { "ru" })
-  "Content-Type" = "application/json; charset=utf-8"
+  Authorization    = "Bearer $env:YANDEX_DIRECT_TOKEN"
+  "Client-Login"   = $env:YANDEX_DIRECT_LOGIN
+  "Accept-Language"= if ($env:YANDEX_DIRECT_ACCEPT_LANGUAGE) { $env:YANDEX_DIRECT_ACCEPT_LANGUAGE } else { "ru" }
 }
 
-Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -ContentType "application/json" -Body $bodyJson
+# For regular services (non-reports): single call
+if ($service -ne "reports") {
+  $req = [System.Net.HttpWebRequest]::Create($uri)
+  $req.Method = "POST"; $req.ContentType = "application/json; charset=utf-8"; $req.ContentLength = $bodyBytes.Length
+  foreach ($h in $headers.GetEnumerator()) { $req.Headers[$h.Key] = $h.Value }
+  $s = $req.GetRequestStream(); $s.Write($bodyBytes, 0, $bodyBytes.Length); $s.Close()
+  $resp = $req.GetResponse()
+  $reader = New-Object System.IO.StreamReader($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+  $reader.ReadToEnd() | ConvertFrom-Json
+  $reader.Close()
+}
+
+# For reports: poll until HTTP 200 (handles 201/202 offline mode)
+if ($service -eq "reports") {
+  $maxRetries = 10; $attempt = 0
+  do {
+    $attempt++
+    $req = [System.Net.HttpWebRequest]::Create($uri)
+    $req.Method = "POST"; $req.ContentType = "application/json; charset=utf-8"; $req.ContentLength = $bodyBytes.Length
+    foreach ($h in $headers.GetEnumerator()) { $req.Headers[$h.Key] = $h.Value }
+    $s = $req.GetRequestStream(); $s.Write($bodyBytes, 0, $bodyBytes.Length); $s.Close()
+    try {
+      $resp = $req.GetResponse()
+      $reader = New-Object System.IO.StreamReader($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+      $tsv = $reader.ReadToEnd(); $reader.Close()
+      Write-Output $tsv; break
+    } catch [System.Net.WebException] {
+      $code = [int]$_.Exception.Response.StatusCode
+      if ($code -in 201,202) {
+        $retryIn = $_.Exception.Response.Headers["retryIn"]
+        $wait = if ($retryIn) { [int]$retryIn } else { 10 }
+        Write-Host "Report queued (HTTP $code). Retry $attempt/$maxRetries in ${wait}s..."
+        Start-Sleep -Seconds $wait
+      } else { throw }
+    }
+  } while ($attempt -lt $maxRetries)
+}
 ```
 
 ## Natural-language to API dispatch (lightweight routing)
