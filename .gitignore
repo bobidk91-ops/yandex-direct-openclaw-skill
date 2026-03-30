@@ -4,3 +4,12 @@
 
 # screenshots / binary assets
 yandex_direct_application_docs/registration_screenshot.png
+
+# temporary data exports (campaign data, reports)
+*.tsv
+*.csv
+ads.txt
+adgroups.txt
+campaigns_list.txt
+keywords_bids.txt
+stats_week.tsv
